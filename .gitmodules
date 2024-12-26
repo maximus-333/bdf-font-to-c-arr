@@ -1,0 +1,3 @@
+[submodule "misc-misc"]
+	path = misc-misc
+	url = https://gitlab.freedesktop.org/xorg/font/misc-misc.git
