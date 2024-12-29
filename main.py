@@ -1,4 +1,6 @@
 
+import math
+import io
 # https://github.com/tomchen/bdfparser
 from bdfparser import Font, Glyph, Bitmap
 
@@ -35,12 +37,13 @@ class BitmapAdv(Bitmap):
         self.transpose()
         self.flipVertical()
 
-    def getCArr(self, entrySizeBytes : int = 1, orderIsRowMajor : bool = True) -> str:
+    def getCArr(self, orderIsRowMajor : bool = True) -> list[str]:
         '''
-        Convert this bitmap to an entry in C array. 
+        Convert this bitmap to data for entry in C array. 
+        Top row of pixels are each LSB of different entries.
         Args:
-        - entrySizeBytes - how many bytes per C array element. 1 is bytes, 2 is shorts
-        - orderIsRowMajor - byte order in array, row major ('Z') or column major ('И')
+        - orderIsRowMajor - byte order in array, row major ('Z') or column major ('|/|')
+        Return - byte array as a list of HEX strings
         '''
         
         # Prepare char for conversion to bytes - 
@@ -53,7 +56,7 @@ class BitmapAdv(Bitmap):
         
         # Split into individual bytes
         byteArr = []
-        nibblesAmt = entrySizeBytes * 2      # Amount of hex symbols per C array entry
+        nibblesAmt = 2      # Amount of hex symbols per C array entry
         for row in data:
             rowArr = []
             for i in range(0, len(row), nibblesAmt):
@@ -65,16 +68,9 @@ class BitmapAdv(Bitmap):
         if(orderIsRowMajor):
             byteArr = [list(row) for row in zip(*byteArr)]
         
-        # TODO - add switch from Little Endian to Big Endian here (if needed)
-        
         # Flatten 2D list into list of strings
         flatByteArr = [elem for row in byteArr for elem in row]
-        
-        # Convert into C array
-        cArrStr = "{ 0x"
-        cArrStr += ", 0x".join(flatByteArr)
-        cArrStr += " }"
-        return cArrStr
+        return flatByteArr
     
     def doPadding(self, top : int, bottom : int, left : int, right : int):
         '''
@@ -100,11 +96,10 @@ class BitmapAdv(Bitmap):
         elif(right < 0):
             self.bindata = [row[:right] for row in self.bindata]
 
-
 class GlyphProcessor:
     '''
     Converter to turn char Glyphs into C array elements with desired 
-    padding/trimming, row/column order, data size, etc.
+    padding/trimming, row/column order, rotation/mirroring.
     '''   
 
     def __init__(self):
@@ -118,7 +113,9 @@ class GlyphProcessor:
         self.arrElemStructName = "fontGlyphEntry_t"
         self.arrName = "fontArray"
         self.setDataOrderRowMajor()
-        self.setDataEntrySize(1)
+        self.mirrorHoriz = False
+        self.mirrorVert = False
+        self.rotationCount = 0
 
     def setPaddingTop(self, pad : int):
         '''
@@ -158,66 +155,97 @@ class GlyphProcessor:
         '''
         self.dataOrderIsRowMajor = False
 
-    def setDataEntrySize(self, size : int):
+    def doHorizontalMirror(self):
         '''
-        Set size of array element in bytes. 
-        1 is byte array, 2 is short array, 3-4 is long array
+        Enable horizontal mirroring.
+        Order of operations - padding, mirroring, rotation
         '''
-        if((size < 1) | (size > 4)):
-            raise ValueError("Element size must be 1-4 bytes")
-        self.dataEntrySize = size
+        self.mirrorHoriz = True
 
-    def getDataEntryType(self) -> str:
+    def doVerticalMirror(self):
         '''
-        Get C type name for array element size
+        Enable vertical mirroring.
+        Order of operations - padding, mirroring, rotation
         '''
-        dataEntryType = ""
-        if(self.dataEntrySize == 1):
-            dataEntryType = "uint8_t"
-        elif(self.dataEntrySize == 2):
-            dataEntryType = "uint16_t"
-        else:
-            dataEntryType = "uint32_t"
-        return dataEntryType
-
-    def glyphToBitmap(self, glyph : Glyph) -> Bitmap:
+        self.mirrorVert = True
+    
+    def rotateCW(self):
         '''
-        Convert glyph into bitmap with applied padding/trimming
+        Rotate clockwise by 90 deg. Can be repeated.
+        Order of operations - padding, mirroring, rotation
+        '''
+        self.rotationCount += 1
+    
+    def rotateCCW(self):
+        '''
+        Rotate counter-clockwise by 90 deg. Can be repeated.
+        Order of operations - padding, mirroring, rotation
+        '''
+        self.rotationCount -= 1
+        
+    def glyphToBitmap(self, glyph: Glyph) -> Bitmap:
+        '''
+        Get transformed bitmap from glyph. 
+        Order of operations - padding, mirroring, rotation
         '''
         bmapPlus = BitmapAdv.fromParent(glyph.draw())
+        # Do padding
         bmapPlus.doPadding(self.padding["Top"], self.padding["Bottom"], self.padding["Left"], self.padding["Right"])
+        # Do mirroring
+        if(self.mirrorHoriz):
+            bmapPlus.flipHorizontal()
+        if(self.mirrorVert):
+            bmapPlus.flipVertical()
+        # Do rotations
+        rotation = self.rotationCount % 4
+        for _ in range(0, rotation, 1):
+            bmapPlus.rotateCW()
+        # Repack into regular bitmap
         return Bitmap(bmapPlus.bindata)
 
-    def glyphToCEntry(self, glyph : Glyph) -> str:
+    def glyphToCEntry(self, glyph: Glyph) -> str:
         '''
         Convert glyph into entry for C array.
-        Example of return string:
-        "{    97, { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05 } }"
+        Return - "{    97, { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05 } }"
         '''
         bmapPlus = BitmapAdv.fromParent(self.glyphToBitmap(glyph))
-        cArr = bmapPlus.getCArr(self.dataEntrySize, self.dataOrderIsRowMajor)
+        data = bmapPlus.getCArr(self.dataOrderIsRowMajor)
+        cArr = "{ 0x"
+        cArr += ", 0x".join(data)
+        cArr += " }"
         cEntry = f"{{ {glyph.cp():>5}, {cArr} }}"
         return cEntry
 
-    def getEntryComment(self, glyph : Glyph) -> str:
+    def getEntryComment(self, charcode : int) -> str:
         '''
         Get a comment for array entry. 
         Example: "' a ' (0x0061)"
         '''
         # Get char if not control code
         charSymbol = ' '
-        if(glyph.chr() >= ' '):
-            charSymbol = glyph.chr()
-        comm = f"\' {charSymbol} \' (0x{glyph.cp():04X})"
+        if(charcode >= ord(' ')):
+            charSymbol = chr(charcode)
+        comm = f"\' {charSymbol} \' (0x{charcode:04X})"
         return comm
 
-    def getArrStructTypedef(self) -> str:
-        dataType = self.getDataEntryType()
+    def getArrStructTypedef(self, baseGlyph: Glyph) -> str:
+        '''
+        Construct pre-array code
+        Args:
+        - baseGlyph - any glyph from font, for reference
+        '''
+        baseBmap = self.glyphToBitmap(baseGlyph)
+        byteHeight = math.ceil(float(baseBmap.height()) / 8.0)
+        byteSize = baseBmap.width() * byteHeight
+        
         return "#include <stdint.h>\n"\
             "\n"\
+            f"#define GLYPH_WIDTH    {baseBmap.width()}\n"\
+            f"#define GLYPH_SIZE     {byteSize}\n"\
+            "\n"\
             "typedef struct {\n"\
-            "\tchar16_t code;\n"\
-            f"\t{dataType} data[];\n"\
+            "    uint16_t charCode;\n"\
+            "    uint8_t data[GLYPH_SIZE];\n"\
             f"}} {self.arrElemStructName};"
 
     def getArrHeader(self) -> str:
@@ -227,15 +255,15 @@ class GlyphProcessor:
         return "};"
 
 
-def fontToCArray(outputHFile : str, inputFontFile : str, glyphProc : GlyphProcessor, charCodes : set):
+def fontToCArray(outputHFile : str, inputFontFile : str, glyphProc : GlyphProcessor, charCodes : list[tuple[int, int]]):
     '''
     Convert select glyphs from font file into C array, write to a file
     Args:
     - outputHFile - path to output .h file. Gets overwritten or created
     - inputFontFile - path to .bdf font file
     - glyphProc - preconfigured GlyphProcessor object for font adjustment
-    - charCodes - set of character codes in UTF-16 that gets put into array. 
-        Chars not present in font are skipped, warning is printed to console
+    - charCodes - list of tuples, each tuple has 2 ints for start/end of range in UTF-16 (inclusive). 
+        Pass None to process full font
     '''
     
     font = Font(inputFontFile)
@@ -244,48 +272,75 @@ def fontToCArray(outputHFile : str, inputFontFile : str, glyphProc : GlyphProces
         f"it contains {len(font)} glyphs.")
     print(font.headers)
     
-    with open(outputHFile, 'w') as file:
-        pass    # erase file
-    with open(outputHFile, 'a', encoding="utf-8") as outFile:
-        # Print struct and array definitions
-        outFile.write(glyphProc.getArrStructTypedef() + '\n\n')
-        outFile.write(glyphProc.getArrHeader() + '\n')
+    # Print struct and array definitions
+    outBuf = io.StringIO()
+    outBuf.write(glyphProc.getArrStructTypedef(next(font.iterglyphs())) + '\n\n')
+    outBuf.write(glyphProc.getArrHeader() + '\n')
+    
+    # Print array itself
+    glyphCount = 0
+    for glyph in font.iterglyphs(order=1, r=charCodes):
+        glyphCount += 1
+        arrEntry = glyphProc.glyphToCEntry(glyph)
+        arrComment = glyphProc.getEntryComment(glyph.cp())
         
-        # Print array itself
-        for charcode in sorted(charCodes):
-            glyph = font.glyphbycp(charcode)
-            if(glyph is None):
-                continue
-            arrEntry = glyphProc.glyphToCEntry(glyph)
-            arrComment = glyphProc.getEntryComment(glyph)
-            
-            fullEntry = f"{arrEntry}, // {arrComment}"
-            outFile.write("\t" + fullEntry + "\n")
-        
-        # Print array footer
-        outFile.write(glyphProc.getArrFooter() + "\n")
+        fullEntry = f"{arrEntry}, // {arrComment}"
+        outBuf.write("\t" + fullEntry + "\n")
+    print("Glyphs in array: " + str(glyphCount))
+    
+    # Print array footer
+    outBuf.write(glyphProc.getArrFooter() + "\n")
+    
+    # Print buffer into file (create or erase file)
+    with open(outputHFile, 'w', encoding="utf-8") as outFile:
+        outFile.write(outBuf.getvalue())
 
-    pass
 
 
 def main():
     
-    outFilename = './outArr.h'
+    # Example 1 - 6x9 font cut cown to 6x8, full font
+    
+    outFilename = './examples/5x8_full.h'
     fontFilename = './misc-misc/6x9.bdf'
-    
-    charset = set()
-    charset |= set(range(0x0000, 0x0080))   # ASCII
-    charset |= set(range(0x0400, 0x0500))   # Cyrillic
-    charset |= set(range(0x2600, 0x2700))   # Misc Symbols
-    
+ 
     glyphProc = GlyphProcessor()
     glyphProc.setPaddingTop(-1)
+    
+    fontToCArray(outFilename, fontFilename, glyphProc, None)
+    
+    # Example 2 - 8x13 font scaled to 8x16, ASCII + Cyrillic + Misc Symbols
+    
+    outFilename = './examples/8x16_vert.h'
+    fontFilename = './misc-misc/8x13.bdf'
+    
+    charlist = list()
+    charlist.append((0x0000, 0x007F))  # ASCII
+    charlist.append((0x0400, 0x04FF))  # Cyrillic
+    charlist.append((0x2600, 0x26FF))  # Misc Symbols
+    
+    glyphProc = GlyphProcessor()
+    glyphProc.setPaddingTop(3)
     glyphProc.setDataOrderRowMajor()
-    glyphProc.setDataEntrySize(1)
     
-    fontToCArray(outFilename, fontFilename, glyphProc, charset)
+    fontToCArray(outFilename, fontFilename, glyphProc, charlist)
     
-    pass
+    # Example 3 - 8x13 font, rotatedm +90deg, in column-major order
+    
+    outFilename = './examples/8x13_horiz.h'
+    fontFilename = './misc-misc/8x13.bdf'
+    
+    charlist = list()
+    charlist.append((0x0000, 0x007F))  # ASCII
+    charlist.append((0x0400, 0x04FF))  # Cyrillic
+    charlist.append((0x2600, 0x26FF))  # Misc Symbols
+    
+    glyphProc = GlyphProcessor()
+    glyphProc.setDataOrderColumnMajor()
+    glyphProc.rotateCCW()
+    
+    fontToCArray(outFilename, fontFilename, glyphProc, charlist)
+
 
 
 if(__name__ == "__main__"):
