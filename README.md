@@ -16,7 +16,7 @@ Workflow is semi-manual, no console interface has been made. Settings must be ad
 ## Requirements
 
 - Python 3.10+
-- bdfparser Python library (can be installed from requirements.txt)
+- [bdfparser](https://github.com/tomchen/bdfparser) Python library (can be installed from requirements.txt)
 
 ## Installation
 
@@ -70,7 +70,7 @@ Configuration is done by manually adjusting code. See examples in "main.py" for 
 To use fonts, user needs to write functions to access array and draw glyph data on screen. 
 Original project used binary search and modified SSD1306 library. 
 
-To specify string literals in code in UTF-16, add 'u' prefix like " u"Test String" ". 
+To specify string literals in code in UTF-16, add 'u' prefix like " u"Test String" ". This requires compiler with support for C11 language standard.
 
 ## Additional information
 
@@ -79,7 +79,7 @@ To specify string literals in code in UTF-16, add 'u' prefix like " u"Test Strin
 
 ## Contributing
 
-Feel free to contribute via a pull request.
+Feel free to contribute via a pull request
 
 ## License
 
